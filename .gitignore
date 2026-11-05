@@ -1,0 +1,17 @@
+# OS files
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Python & Environment
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+
+# Temp & logs
+*.tmp
+*.log
+stderr.txt

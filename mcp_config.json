@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "babeldoc-translator": {
+      "command": "C:\\Users\\fyy26\\AppData\\Roaming\\uv\\tools\\pdf2zh-next-mcp\\Scripts\\python.exe",
+      "args": [
+        "-m",
+        "pdf2zh_next_mcp.main"
+      ]
+    }
+  }
+}
