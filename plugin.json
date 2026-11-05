@@ -1,8 +1,8 @@
 {
   "name": "babeldoc-plugin",
   "displayName": "BabelDOC 论文排版翻译",
-  "version": "1.1.0",
-  "description": "专为学术论文与复杂排版课件设计的 PDF 双语/单语翻译插件。基于 BabelDOC 与 pdf2zh-next 核心，支持 NVIDIA 独显 GPU 硬件加速（DirectML/CUDA），内置 Windows 自愈、版面 NMS 去重与全语境回填技术，利用 Antigravity 内置 AI 额度进行高质量翻译，完美保留 LaTeX 公式、表格与多栏矢量排版。",
+  "version": "2.0.0",
+  "description": "专为学术论文与复杂排版课件设计的 PDF 双语/单语翻译插件（v2.0 极速内存架构）。基于 BabelDOC 核心，支持 NVIDIA 独显 GPU 与 CPU 自由切换（device='auto'|'gpu'|'cpu'），内置零子进程内存收集/回填、多线程图像预处理与 IR 快照缓存，完美保留 LaTeX 公式、表格与多栏矢量排版。",
   "suggestedPrompts": [
     "帮我翻译这篇学术论文 PDF，生成中英双语对照版",
     "使用 BabelDOC 翻译指定的 PDF 论文，保留版面排版和数学公式",
