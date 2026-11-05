@@ -41,6 +41,49 @@ BABELDOC_PYTHON = _find_babeldoc_python()
 SESSIONS: dict[str, dict] = {}
 
 
+def _ensure_babeldoc_environment(device_pref: str, log_file: Path | None = None) -> str:
+    """Auto-heal / bootstrap `pdf2zh-next` and `onnxruntime-directml` on a fresh machine."""
+    global BABELDOC_PYTHON
+    py_path = Path(BABELDOC_PYTHON)
+    appdata = os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming"))
+    expected_uv_py = Path(appdata) / "uv" / "tools" / "pdf2zh-next" / "Scripts" / "python.exe"
+
+    def _log(msg: str):
+        if log_file:
+            with open(log_file, "a", encoding="utf-8") as lf:
+                lf.write(f"[Bootstrap] {msg}\n")
+
+    # 1. If pdf2zh-next uv tool is missing on a new machine, install it automatically
+    if not expected_uv_py.exists() and os.name == "nt":
+        _log("pdf2zh-next environment not found. Installing via `uv tool install pdf2zh-next`...")
+        subprocess.run(["uv", "tool", "install", "pdf2zh-next"], capture_output=True)
+        if expected_uv_py.exists():
+            BABELDOC_PYTHON = str(expected_uv_py)
+            py_path = expected_uv_py
+
+    # 2. Ensure onnxruntime-directml is installed for GPU acceleration on Windows
+    if os.name == "nt" and device_pref in ("auto", "gpu") and py_path.exists():
+        dml_marker = py_path.parent.parent / ".dml_ready"
+        if not dml_marker.exists():
+            res = subprocess.run(
+                [str(py_path), "-c", "import onnxruntime as ort; assert 'DmlExecutionProvider' in ort.get_available_providers()"],
+                capture_output=True,
+            )
+            if res.returncode != 0:
+                _log("Installing onnxruntime-directml==1.20.1 for NVIDIA/DirectML GPU acceleration...")
+                subprocess.run(
+                    ["uv", "pip", "uninstall", "--python", str(py_path), "onnxruntime", "onnxruntime-directml"],
+                    capture_output=True,
+                )
+                subprocess.run(
+                    ["uv", "pip", "install", "--python", str(py_path), "onnxruntime-directml==1.20.1"],
+                    capture_output=True,
+                )
+            dml_marker.write_text("ok", encoding="utf-8")
+
+    return str(py_path)
+
+
 def _normalize_device(device: str | None, fallback: str = "auto") -> str:
     val = (device or fallback or "auto").strip().lower()
     if val not in ("auto", "gpu", "cpu"):
@@ -144,8 +187,9 @@ def extract_segments(
     _save_meta(sdir, meta)
 
     def _run_extraction():
+        python_exe = _ensure_babeldoc_environment(device_pref, log_file)
         cmd = [
-            BABELDOC_PYTHON,
+            python_exe,
             str(ENGINE_SCRIPT),
             "--mode",
             "extract",
@@ -461,8 +505,9 @@ def assemble_translated(
     _save_meta(sdir, meta)
 
     def _run_assembly():
+        python_exe = _ensure_babeldoc_environment(device_pref, assemble_log)
         cmd = [
-            BABELDOC_PYTHON,
+            python_exe,
             str(ENGINE_SCRIPT),
             "--mode",
             "assemble",

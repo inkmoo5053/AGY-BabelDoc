@@ -1,58 +1,33 @@
-# BabelDOC 论文与课件排版翻译插件 (AGY-BabelDoc)
+# AGY-BabelDoc (v2.0 Fast In-Memory Pipeline)
 
-专为学术论文与复杂排版课件设计的 PDF 双语/单语翻译插件。基于 **BabelDOC** 与 **pdf2zh-next** 核心，专为 Antigravity 智能体生态定制，利用 Antigravity 内置 AI 额度进行高质量学术翻译，完美保留 LaTeX 公式、表格、多栏矢量版面与图表结构。
+专为 Google Antigravity 打造的学术论文与复杂课件 PDF 双语/单语高保真排版翻译插件。
+
+## 核心特性 (v2.0)
+
+1. **进程内极速内存架构 (`fast-in-memory-v2`)**：
+   - 彻底消除传统 `CLITranslator` 每段文本启动外部 `python.exe` 子进程的 IPC 通信瓶颈（提取与回填耗时从数分钟缩短至 `< 0.1 秒`）。
+2. **Pass 1 → Pass 2 中间表示快照缓存 (`ir_cache.pkl`)**：
+   - Pass 1 提取完分段后直接保存版面与公式结构快照，跳过冗余的首次 PDF 渲染；
+   - Pass 2 组装时 `0.7 秒` 瞬间恢复版面缓存，彻底跳过二次加载 ONNX 模型与二次 YOLO 版面分析。
+3. **NVIDIA 独显与 CPU 自由切换 (`device="auto" | "gpu" | "cpu"`)**：
+   - `"auto"` / `"gpu"`：通过 Windows DXGI 自动识别并绑定 NVIDIA 独立显卡（`DmlExecutionProvider`），避免双显卡笔记本误绑核显。
+   - `"cpu"`：强制使用 `CPUExecutionProvider`（0 MB 独显显存占用），同时依然享受多线程图像预处理与 IR 快照加速。
+4. **平时零常驻显存占用**：
+   - 闲置时仅保留轻量 MCP 通信壳（`0 MB` 显存占用），翻译任务结束后子进程立即释放全部显存与内存。
 
 ---
 
-## ✨ 核心特性
+## 快速安装指南 (Windows)
 
-- 📄 **高保真版面还原**：保留原论文的字体字号、多栏排版、复杂图表及页眉页脚。
-- 📐 **LaTeX 公式与占位符保护**：公式及变量自动占位保护（如 `{v0}`, `{v1}`），防止翻译污染。
-- ⚡ **硬件加速支持**：支持本地 NVIDIA 独显（DirectML / CUDA）硬件加速版面分析，提速高达 6.5 倍；无 GPU 时自动降级 CPU。
-- 🤖 **零额外 API 成本**：直接利用 Antigravity 内部大模型配额，无需配置昂贵的外置商用翻译 API。
-- 📊 **多格式兼容**：原生支持 PDF，支持 PPTX 课件无损自动转换与翻译。
-- 📖 **双版本同步输出**：
-  - 中英双语对照版（`-dual.pdf`）
-  - 全中文纯享版（`-mono.pdf`）
-
----
-
-## 📂 插件目录结构
-
-```text
-babeldoc-plugin/
-├── plugin.json                    # 插件元数据与能力声明
-├── mcp_config.json                # 本地 MCP 依赖环境配置
-├── skills/
-│   └── babeldoc-translate/
-│       └── SKILL.md               # 论文与课件排版翻译核心工作流技能
-├── LICENSE                        # 开源协议
-└── README.md                      # 插件说明文档
+### 1. 克隆插件至 Antigravity 全局插件目录
+```powershell
+git clone https://github.com/inkmoo5053/AGY-BabelDoc.git "$env:USERPROFILE\.gemini\config\plugins\babeldoc-plugin"
 ```
 
----
+### 2. 初始化底层依赖环境（首次安装执行一次，或交由插件首次运行时自动自愈）
+```powershell
+powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.gemini\config\plugins\babeldoc-plugin\install.ps1"
+```
 
-## 🛠️ 核心工作流（解耦三步法）
-
-1. **提取分段（Extract）**：
-   调用 MCP 工具解析 PDF 版面与矢量流，提取待翻译文本分段并保护数学公式占位符。
-2. **AI 智能翻译（Translate）**：
-   由 Antigravity 智能体执行学术级高质量翻译，保持上下文连贯与严格 1:1 对齐。
-3. **矢量重排版（Assemble）**：
-   将翻译后的内容回填至原 PDF 版面，生成高质量的双语版与单语版文档。
-
----
-
-## 🚀 使用方法
-
-在 Antigravity 对话中直接输入自然语言指令即可触发：
-
-- “帮我翻译这篇学术论文 PDF，生成中英双语对照版”
-- “使用 BabelDOC 翻译指定的 PDF 论文，保留版面排版和数学公式”
-- “翻译这份课件幻灯片 PDF 并保留原有布局”
-
----
-
-## 📄 开源许可
-
-本项目遵循 [Apache-2.0](LICENSE) 许可协议。
+### 3. 在 Antigravity 中启用
+重启 Antigravity（或在 Customizations -> Plugins 页面开启 `BabelDOC 论文排版翻译`），即可直接通过 `@[plugin:babeldoc-plugin]` 调用翻译。

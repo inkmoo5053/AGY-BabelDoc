@@ -1,9 +1,11 @@
 {
   "mcpServers": {
     "babeldoc-translator": {
-      "command": "C:\\Users\\fyy26\\AppData\\Roaming\\uv\\tools\\pdf2zh-next-mcp\\Scripts\\python.exe",
+      "command": "cmd.exe",
       "args": [
-        "C:\\Users\\fyy26\\.gemini\\config\\plugins\\babeldoc-plugin\\server\\main.py"
+        "/d",
+        "/c",
+        "\"%APPDATA%\\uv\\tools\\pdf2zh-next-mcp\\Scripts\\python.exe\" \"%USERPROFILE%\\.gemini\\config\\plugins\\babeldoc-plugin\\server\\main.py\""
       ]
     }
   }
