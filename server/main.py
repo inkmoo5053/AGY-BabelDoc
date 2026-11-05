@@ -1,6 +1,5 @@
 import json
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -58,43 +57,88 @@ def _normalize_device(device: str | None, fallback: str = "auto") -> str:
     return val
 
 
+def _resolve_session_dir(session_dir_or_id: str) -> Path:
+    p = Path(session_dir_or_id)
+    if p.exists() and p.is_dir():
+        return p.resolve()
+    cand = Path(tempfile.gettempdir()) / f"babeldoc_mcp_{session_dir_or_id}"
+    if cand.exists():
+        return cand.resolve()
+    return p.resolve()
+
+
+def _load_meta(sdir: Path) -> dict:
+    key = str(sdir)
+    if key in SESSIONS:
+        return SESSIONS[key]
+    meta_file = sdir / "session_meta.json"
+    if meta_file.exists():
+        try:
+            data = json.loads(meta_file.read_text(encoding="utf-8"))
+            SESSIONS[key] = data
+            return data
+        except Exception:
+            pass
+    return {}
+
+
+def _save_meta(sdir: Path, meta: dict):
+    key = str(sdir)
+    SESSIONS[key] = meta
+    meta_file = sdir / "session_meta.json"
+    try:
+        tmp = meta_file.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(meta_file)
+    except Exception:
+        pass
+
+
 @mcp.tool()
 def extract_segments(
-    pdf_path: str,
+    file: str = "",
     lang_in: str = "en",
     lang_out: str = "zh",
+    output_dir: str = "",
     pages: str = "",
     device: str = "auto",
+    pdf_path: str = "",
 ) -> str:
     """
-    Step 1 (Async): Start extracting translatable text segments from a PDF using BabelDOC's layout analysis.
-    Because layout analysis (OCR/vision) can take 10-60 seconds, this tool starts the job in the background
-    and returns a `session_id` immediately.
-     MUST call `check_extraction_status(session_id)` afterwards to wait for completion and get the segments!
+    从 PDF 文件中提取待翻译的文本分段（异步后台执行，内置 IR 缓存快照与 GPU/CPU 加速）。
 
     Args:
-        pdf_path: Absolute path to the source PDF file.
-        lang_in: Source language code (default: "en").
-        lang_out: Target language code (default: "zh").
-        pages: Optional page range to translate (e.g., "1-3", "1,3,5-7"). Leave empty for all pages.
-        device: Inference device for layout analysis: "auto" (default, uses discrete GPU if available else CPU), "gpu" (force discrete GPU), or "cpu" (force CPU with 0 VRAM usage).
+        file: PDF 文件的本地绝对路径。
+        lang_in: 源语言代码 (默认: "en")。
+        lang_out: 目标语言代码 (默认: "zh")。
+        output_dir: 输出目录路径 (默认与原 PDF 同目录)。
+        pages: 可选页码范围 (例如 "1-5", "1,3,5-7")。
+        device: 加速设备选项。'auto' (默认推荐，自动优先使用 NVIDIA 独显 GPU 并降级 CPU), 'gpu' (强制独显 GPU 加速), 'cpu' (仅使用 CPU 运算，0 显存占用)。
     """
-    pdf_file = Path(pdf_path).resolve()
+    target_pdf = file or pdf_path
+    if not target_pdf:
+        return "Error: `file` path is required."
+
+    pdf_file = Path(target_pdf).resolve()
     if not pdf_file.exists():
-        return f"Error: PDF file not found at {pdf_path}"
+        return f"Error: PDF file not found at {target_pdf}"
 
+    out_dir = Path(output_dir).resolve() if output_dir else pdf_file.parent
     device_pref = _normalize_device(device, "auto")
+
     session_id = str(uuid.uuid4())[:8]
-    session_dir = Path(tempfile.gettempdir()) / f"babeldoc_mcp_{session_id}"
-    session_dir.mkdir(parents=True, exist_ok=True)
+    sdir = (Path(tempfile.gettempdir()) / f"babeldoc_mcp_{session_id}").resolve()
+    sdir.mkdir(parents=True, exist_ok=True)
 
-    segments_file = session_dir / "segments.json"
+    segments_file = sdir / "segments.json"
     segments_file.write_text("[]", encoding="utf-8")
-    log_file = session_dir / "extract.log"
+    log_file = sdir / "extract.log"
 
-    SESSIONS[session_id] = {
+    meta = {
+        "session_id": session_id,
+        "session_dir": str(sdir),
         "pdf_path": str(pdf_file),
-        "session_dir": str(session_dir),
+        "output_dir": str(out_dir),
         "segments_file": str(segments_file),
         "lang_in": lang_in,
         "lang_out": lang_out,
@@ -104,7 +148,9 @@ def extract_segments(
         "error": None,
         "start_time": time.time(),
         "log_file": str(log_file),
+        "translated_cursor": 0,
     }
+    _save_meta(sdir, meta)
 
     def _run_extraction():
         cmd = [
@@ -115,7 +161,7 @@ def extract_segments(
             "--pdf-path",
             str(pdf_file),
             "--session-dir",
-            str(session_dir),
+            str(sdir),
             "--lang-in",
             lang_in,
             "--lang-out",
@@ -141,7 +187,8 @@ def extract_segments(
                     errors="replace",
                     env=env,
                 )
-                SESSIONS[session_id]["pid"] = proc.pid
+                meta["pid"] = proc.pid
+                _save_meta(sdir, meta)
                 proc.wait()
 
             try:
@@ -153,31 +200,30 @@ def extract_segments(
                 log_tail = ""
                 if log_file.exists():
                     log_tail = log_file.read_text(encoding="utf-8", errors="replace")[-2000:]
-                SESSIONS[session_id]["status"] = "failed"
-                SESSIONS[session_id]["error"] = (
-                    f"Process exited with code {proc.returncode}.\nLog tail:\n{log_tail}"
-                )
+                meta["status"] = "failed"
+                meta["error"] = f"Process exited with code {proc.returncode}.\nLog tail:\n{log_tail}"
             else:
-                SESSIONS[session_id]["status"] = "completed"
-                SESSIONS[session_id]["elapsed"] = round(
-                    time.time() - SESSIONS[session_id]["start_time"], 2
-                )
+                meta["status"] = "extracted"
+                meta["elapsed"] = round(time.time() - meta["start_time"], 2)
+            _save_meta(sdir, meta)
         except Exception as e:
-            SESSIONS[session_id]["status"] = "failed"
-            SESSIONS[session_id]["error"] = str(e)
+            meta["status"] = "failed"
+            meta["error"] = str(e)
+            _save_meta(sdir, meta)
 
     thread = threading.Thread(target=_run_extraction, daemon=True)
     thread.start()
 
     return json.dumps(
         {
+            "status": "extracting",
+            "session_dir": str(sdir),
             "session_id": session_id,
-            "status": "running",
             "device": device_pref,
             "engine": "fast-in-memory-v2",
             "message": (
-                f"Extraction started in background (device={device_pref}). "
-                "Please call `check_extraction_status(session_id)` to poll progress and retrieve segments."
+                f"Extraction started in background (device={device_pref}, engine=fast-in-memory-v2). "
+                "Call `check_extraction_status(session_dir)` to wait for completion and get segments."
             ),
         },
         ensure_ascii=False,
@@ -186,87 +232,102 @@ def extract_segments(
 
 
 @mcp.tool()
-def check_extraction_status(session_id: str, wait_seconds: int = 10) -> str:
+def check_extraction_status(
+    session_dir: str = "",
+    offset: int = 0,
+    session_id: str = "",
+    wait_seconds: int = 15,
+) -> str:
     """
-    Poll the status of a background segment extraction job started by `extract_segments`.
-    Wait up to `wait_seconds` (capped at 25s to avoid MCP timeout) for the job to finish.
-    If still running, call this tool again until status is 'completed'.
+    检查分段提取进度。完成时返回待翻译分段与翻译指令。
+
+    Args:
+        session_dir: extract_segments 返回的会话目录路径。
+        offset: 分段起始索引 (默认: 0)。
     """
-    if session_id not in SESSIONS:
-        return f"Error: Unknown session_id '{session_id}'."
+    target_key = session_dir or session_id
+    if not target_key:
+        return "Error: `session_dir` is required."
 
-    session = SESSIONS[session_id]
-    wait_seconds = min(max(1, wait_seconds), 25)
+    sdir = _resolve_session_dir(target_key)
+    meta = _load_meta(sdir)
+    if not meta:
+        return f"Error: Unknown session '{target_key}'."
 
-    deadline = time.time() + wait_seconds
+    wait_sec = min(max(1, wait_seconds), 25)
+    deadline = time.time() + wait_sec
     while time.time() < deadline:
-        if session["status"] in ("completed", "failed"):
+        meta = _load_meta(sdir)
+        if meta.get("status") in ("extracted", "completed", "failed"):
             break
         time.sleep(0.5)
 
-    segments_file = Path(session["segments_file"])
-    segments = []
+    segments_file = sdir / "segments.json"
+    raw_segments = []
     if segments_file.exists():
         try:
-            segments = json.loads(segments_file.read_text(encoding="utf-8"))
+            raw_segments = json.loads(segments_file.read_text(encoding="utf-8"))
         except Exception:
             pass
 
-    if session["status"] == "running":
-        elapsed = int(time.time() - session["start_time"])
+    status = meta.get("status", "running")
+    if status == "running":
+        elapsed = round(time.time() - meta.get("start_time", time.time()), 1)
         log_tail = ""
-        log_file = Path(session["log_file"])
+        log_file = Path(meta.get("log_file", sdir / "extract.log"))
         if log_file.exists():
-            lines = (
-                log_file.read_text(encoding="utf-8", errors="replace")
-                .strip()
-                .splitlines()
-            )
+            lines = log_file.read_text(encoding="utf-8", errors="replace").strip().splitlines()
             if lines:
                 log_tail = lines[-1][-200:]
         return json.dumps(
             {
-                "session_id": session_id,
-                "status": "running",
-                "device": session.get("device", "auto"),
+                "status": "extracting",
+                "session_dir": str(sdir),
+                "device": meta.get("device", "auto"),
                 "elapsed_seconds": elapsed,
-                "segments_extracted_so_far": len(segments),
+                "segments_extracted_so_far": len(raw_segments),
                 "latest_log": log_tail,
-                "message": "Still extracting layout and segments... Please call `check_extraction_status` again.",
+                "message": "Still extracting layout and segments... Call `check_extraction_status` again.",
             },
             ensure_ascii=False,
             indent=2,
         )
 
-    if session["status"] == "failed":
+    if status == "failed":
         return json.dumps(
             {
-                "session_id": session_id,
                 "status": "failed",
-                "device": session.get("device", "auto"),
-                "error": session["error"],
+                "session_dir": str(sdir),
+                "device": meta.get("device", "auto"),
+                "error": meta.get("error"),
             },
             ensure_ascii=False,
             indent=2,
         )
+
+    # Return slice starting from offset
+    total = len(raw_segments)
+    sliced = raw_segments[offset:]
+    source_texts = [s["source"] if isinstance(s, dict) else str(s) for s in sliced]
 
     return json.dumps(
         {
-            "session_id": session_id,
-            "status": "completed",
-            "device": session.get("device", "auto"),
-            "elapsed_seconds": session.get("elapsed"),
-            "pdf_path": session["pdf_path"],
-            "total_segments": len(segments),
+            "status": "extracted",
+            "session_dir": str(sdir),
+            "device": meta.get("device", "auto"),
+            "elapsed_seconds": meta.get("elapsed"),
+            "total_segments": total,
+            "offset": offset,
+            "returned_count": len(source_texts),
             "instructions": (
-                "Translate the `source` field of each segment into the target language. "
-                "CRITICAL RULES:\n"
-                "1. Preserve ALL placeholders like `{v1}`, `{v2}` or `<style id='1'>...</style>` EXACTLY as they appear!\n"
-                "2. Do NOT add or remove segments.\n"
-                "3. Call `save_translated_segments` (you can do this in batches if there are many segments), "
-                "then call `assemble_translated` to generate the final PDF."
+                "请将 segments 中的每条英文文本翻译为目标语言，并调用 `save_translated_segments(session_dir, segments_json)` 保存。\n"
+                "重要规则：\n"
+                "1. 严禁修改或删除 `{v1}`, `{v2}` 或 `<style id='1'>...</style>` 等占位符！\n"
+                "2. 译文数量必须与原分段 1:1 严格对齐（支持分批多次调用 save_translated_segments）。\n"
+                "3. 全部保存后调用 `assemble_translated(session_dir)` 生成最终 PDF。"
             ),
-            "segments": segments,
+            "segments": source_texts,
+            "segment_objects": sliced,
         },
         ensure_ascii=False,
         indent=2,
@@ -274,102 +335,139 @@ def check_extraction_status(session_id: str, wait_seconds: int = 10) -> str:
 
 
 @mcp.tool()
-def save_translated_segments(session_id: str, translations_json: str) -> str:
+def save_translated_segments(
+    session_dir: str = "",
+    segments_json: str = "",
+    session_id: str = "",
+    translations_json: str = "",
+) -> str:
     """
-    Step 2: Save translated segments back into the session.
-    Can be called multiple times in batches for large documents.
+    保存翻译后的文本分段到当前会话。支持分批多次调用累加保存。
 
     Args:
-        session_id: The session_id returned by `extract_segments`.
-        translations_json: A JSON string representing a list of objects: `[{"id": 0, "translated": "..."}, ...]`,
-                           OR a dict mapping id to translation: `{"0": "...", "1": "..."}`.
+        session_dir: extract_segments 返回的会话目录路径。
+        segments_json: 翻译后的分段 JSON 字符串（支持字符串数组 `["译文1", "译文2"]`、对象数组 `[{"id": 0, "translated": "..."}]` 或字典 `{"0": "..."}`）。
     """
-    if session_id not in SESSIONS:
-        return f"Error: Unknown session_id '{session_id}'."
+    target_key = session_dir or session_id
+    payload_str = segments_json or translations_json
+    if not target_key:
+        return "Error: `session_dir` is required."
 
-    session = SESSIONS[session_id]
-    segments_file = Path(session["segments_file"])
+    sdir = _resolve_session_dir(target_key)
+    meta = _load_meta(sdir)
+    segments_file = sdir / "segments.json"
+    if not segments_file.exists():
+        return f"Error: segments.json not found in {sdir}"
+
     segments = json.loads(segments_file.read_text(encoding="utf-8"))
-
     try:
-        data = json.loads(translations_json)
+        data = json.loads(payload_str)
     except Exception as e:
-        return f"Error parsing translations_json: {e}"
-
-    id_map: dict[int, str] = {}
-    if isinstance(data, list):
-        for idx, item in enumerate(data):
-            if isinstance(item, dict) and "id" in item and "translated" in item:
-                id_map[int(item["id"])] = str(item["translated"])
-            elif isinstance(item, str):
-                id_map[idx] = item
-    elif isinstance(data, dict):
-        for k, v in data.items():
-            id_map[int(k)] = str(v)
-    else:
-        return "Error: translations_json must be a JSON list or dict."
+        return f"Error parsing segments_json: {e}"
 
     updated = 0
-    for seg in segments:
-        sid = int(seg["id"])
-        if sid in id_map:
-            seg["translated"] = id_map[sid]
-            updated += 1
+    if isinstance(data, list):
+        if all(isinstance(x, str) for x in data):
+            # If len matches total segments, overwrite from 0; otherwise append from first untranslated cursor
+            if len(data) == len(segments):
+                start_idx = 0
+            else:
+                # Find first untranslated segment index
+                first_untranslated = next(
+                    (i for i, s in enumerate(segments) if not s.get("translated")),
+                    meta.get("translated_cursor", 0),
+                )
+                start_idx = first_untranslated
+            for offset_i, text_val in enumerate(data):
+                target_idx = start_idx + offset_i
+                if 0 <= target_idx < len(segments):
+                    segments[target_idx]["translated"] = text_val
+                    updated += 1
+            meta["translated_cursor"] = start_idx + updated
+        else:
+            id_map = {}
+            for idx, item in enumerate(data):
+                if isinstance(item, dict) and "id" in item and "translated" in item:
+                    id_map[int(item["id"])] = str(item["translated"])
+                elif isinstance(item, str):
+                    id_map[idx] = item
+            for seg in segments:
+                sid = int(seg["id"])
+                if sid in id_map:
+                    seg["translated"] = id_map[sid]
+                    updated += 1
+    elif isinstance(data, dict):
+        id_map = {int(k): str(v) for k, v in data.items()}
+        for seg in segments:
+            sid = int(seg["id"])
+            if sid in id_map:
+                seg["translated"] = id_map[sid]
+                updated += 1
+    else:
+        return "Error: segments_json must be a JSON list or dict."
 
     segments_file.write_text(
         json.dumps(segments, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-    remaining = sum(1 for s in segments if not s.get("translated"))
+    _save_meta(sdir, meta)
 
-    return (
-        f"Updated {updated} segments in session '{session_id}'. "
-        f"Total segments: {len(segments)}, Remaining untranslated: {remaining}."
+    translated_total = sum(1 for s in segments if s.get("translated"))
+    remaining = len(segments) - translated_total
+    return json.dumps(
+        {
+            "status": "saved",
+            "session_dir": str(sdir),
+            "updated_in_this_call": updated,
+            "translated_count": translated_total,
+            "total_segments": len(segments),
+            "remaining_untranslated": remaining,
+        },
+        ensure_ascii=False,
+        indent=2,
     )
 
 
 @mcp.tool()
 def assemble_translated(
-    session_id: str,
+    session_dir: str = "",
+    glossary_json: str = "",
+    device: str = "",
+    session_id: str = "",
     output_dir: str = "",
     no_dual: bool = False,
     no_mono: bool = False,
-    device: str = "auto",
 ) -> str:
     """
-    Step 3 (Async): Start re-assembling the translated PDF in the background using BabelDOC.
-    Returns immediately. You MUST call `check_assembly_status(session_id)` afterwards to wait for the final PDFs!
+    使用已保存的翻译分段组装并生成最终的 PDF（自动复用 Pass 1 IR 缓存快照，秒级回填排版）。
 
     Args:
-        session_id: The session_id returned by `extract_segments`.
-        output_dir: Directory where the translated PDFs (`*.mono.pdf` and `*.dual.pdf`) will be saved.
-                    Defaults to the same directory as the original PDF.
-        no_dual: If True, do not generate the bilingual side-by-side PDF.
-        no_mono: If True, do not generate the monolingual translated PDF.
-        device: Inference device ("auto", "gpu", or "cpu"). Defaults to the device used in `extract_segments`.
+        session_dir: 会话目录路径。
+        glossary_json: 可选术语表 JSON 字符串。
+        device: (可选) 加速设备选项：'auto', 'gpu', 'cpu'。若留空则沿用提取时设定的设备。
     """
-    if session_id not in SESSIONS:
-        return f"Error: Unknown session_id '{session_id}'."
+    target_key = session_dir or session_id
+    if not target_key:
+        return "Error: `session_dir` is required."
 
-    session = SESSIONS[session_id]
-    pdf_file = Path(session["pdf_path"])
-    session_dir = Path(session["session_dir"])
+    sdir = _resolve_session_dir(target_key)
+    meta = _load_meta(sdir)
+    if not meta:
+        return f"Error: Unknown session '{target_key}'."
 
-    out_path = Path(output_dir).resolve() if output_dir else pdf_file.parent
+    pdf_file = Path(meta["pdf_path"])
+    out_path = Path(output_dir).resolve() if output_dir else Path(meta.get("output_dir", pdf_file.parent)).resolve()
     out_path.mkdir(parents=True, exist_ok=True)
 
-    # If user leaves device="auto", inherit the explicit device from extract_segments if one was set
-    device_pref = _normalize_device(
-        device if device != "auto" else session.get("device", "auto"),
-        session.get("device", "auto"),
-    )
+    device_pref = _normalize_device(device, meta.get("device", "auto"))
+    assemble_log = sdir / "assemble.log"
 
-    assemble_log = session_dir / "assemble.log"
-    session["assemble_status"] = "running"
-    session["assemble_error"] = None
-    session["assemble_start_time"] = time.time()
-    session["assemble_log"] = str(assemble_log)
-    session["output_dir"] = str(out_path)
-    session["assemble_device"] = device_pref
+    meta["assemble_status"] = "running"
+    meta["assemble_error"] = None
+    meta["assemble_start_time"] = time.time()
+    meta["assemble_log"] = str(assemble_log)
+    meta["output_dir"] = str(out_path)
+    meta["assemble_device"] = device_pref
+    _save_meta(sdir, meta)
 
     def _run_assembly():
         cmd = [
@@ -380,18 +478,19 @@ def assemble_translated(
             "--pdf-path",
             str(pdf_file),
             "--session-dir",
-            str(session_dir),
+            str(sdir),
             "--output-dir",
             str(out_path),
             "--lang-in",
-            session["lang_in"],
+            meta.get("lang_in", "en"),
             "--lang-out",
-            session["lang_out"],
+            meta.get("lang_out", "zh"),
             "--device",
             device_pref,
         ]
-        if session["pages"] and session["pages"].strip():
-            cmd.extend(["--pages", session["pages"].strip()])
+        pages = meta.get("pages", "")
+        if pages and pages.strip():
+            cmd.extend(["--pages", pages.strip()])
         if no_dual:
             cmd.append("--no-dual")
         if no_mono:
@@ -412,7 +511,8 @@ def assemble_translated(
                     errors="replace",
                     env=env,
                 )
-                session["assemble_pid"] = proc.pid
+                meta["assemble_pid"] = proc.pid
+                _save_meta(sdir, meta)
                 proc.wait()
 
             stem = pdf_file.stem
@@ -424,32 +524,34 @@ def assemble_translated(
                 log_tail = ""
                 if assemble_log.exists():
                     log_tail = assemble_log.read_text(encoding="utf-8", errors="replace")[-2000:]
-                session["assemble_status"] = "failed"
-                session["assemble_error"] = (
+                meta["assemble_status"] = "failed"
+                meta["assemble_error"] = (
                     f"Process exited with code {proc.returncode}.\nLog tail:\n{log_tail}"
                 )
             else:
-                session["assemble_status"] = "completed"
-                session["assemble_elapsed"] = round(
-                    time.time() - session["assemble_start_time"], 2
+                meta["assemble_status"] = "completed"
+                meta["assemble_elapsed"] = round(
+                    time.time() - meta["assemble_start_time"], 2
                 )
-                session["generated_files"] = [str(p) for p in generated]
+                meta["generated_files"] = [str(p) for p in generated]
+            _save_meta(sdir, meta)
         except Exception as e:
-            session["assemble_status"] = "failed"
-            session["assemble_error"] = str(e)
+            meta["assemble_status"] = "failed"
+            meta["assemble_error"] = str(e)
+            _save_meta(sdir, meta)
 
     thread = threading.Thread(target=_run_assembly, daemon=True)
     thread.start()
 
     return json.dumps(
         {
-            "session_id": session_id,
-            "status": "running",
+            "status": "assembling",
+            "session_dir": str(sdir),
             "device": device_pref,
             "engine": "fast-in-memory-v2",
             "message": (
-                f"PDF assembly started in background (device={device_pref}). "
-                "Please call `check_assembly_status(session_id)` to poll progress."
+                f"PDF assembly started in background (device={device_pref}, engine=fast-in-memory-v2). "
+                "Call `check_assembly_status(session_dir)` to wait for completion."
             ),
         },
         ensure_ascii=False,
@@ -458,57 +560,63 @@ def assemble_translated(
 
 
 @mcp.tool()
-def check_assembly_status(session_id: str, wait_seconds: int = 10) -> str:
+def check_assembly_status(
+    session_dir: str = "",
+    session_id: str = "",
+    wait_seconds: int = 15,
+) -> str:
     """
-    Poll the status of a background PDF assembly job started by `assemble_translated`.
-    Wait up to `wait_seconds` (capped at 25s) for completion.
+    检查 PDF 组装进度。
+
+    Args:
+        session_dir: extract_segments 返回的会话目录路径。
     """
-    if session_id not in SESSIONS:
-        return f"Error: Unknown session_id '{session_id}'."
+    target_key = session_dir or session_id
+    if not target_key:
+        return "Error: `session_dir` is required."
 
-    session = SESSIONS[session_id]
-    if "assemble_status" not in session:
-        return f"Error: `assemble_translated` has not been called for session '{session_id}'."
+    sdir = _resolve_session_dir(target_key)
+    meta = _load_meta(sdir)
+    if not meta or "assemble_status" not in meta:
+        return f"Error: `assemble_translated` has not been called for session '{target_key}'."
 
-    wait_seconds = min(max(1, wait_seconds), 25)
-    deadline = time.time() + wait_seconds
+    wait_sec = min(max(1, wait_seconds), 25)
+    deadline = time.time() + wait_sec
     while time.time() < deadline:
-        if session["assemble_status"] in ("completed", "failed"):
+        meta = _load_meta(sdir)
+        if meta.get("assemble_status") in ("completed", "failed"):
             break
         time.sleep(0.5)
 
-    if session["assemble_status"] == "running":
-        elapsed = int(time.time() - session["assemble_start_time"])
+    status = meta.get("assemble_status", "running")
+    if status == "running":
+        elapsed = round(time.time() - meta.get("assemble_start_time", time.time()), 1)
         log_tail = ""
-        log_file = Path(session["assemble_log"])
+        log_file = Path(meta.get("assemble_log", sdir / "assemble.log"))
         if log_file.exists():
-            lines = (
-                log_file.read_text(encoding="utf-8", errors="replace")
-                .strip()
-                .splitlines()
-            )
+            lines = log_file.read_text(encoding="utf-8", errors="replace").strip().splitlines()
             if lines:
                 log_tail = lines[-1][-200:]
         return json.dumps(
             {
-                "session_id": session_id,
-                "status": "running",
-                "device": session.get("assemble_device", "auto"),
+                "status": "assembling",
+                "session_dir": str(sdir),
+                "device": meta.get("assemble_device", "auto"),
                 "elapsed_seconds": elapsed,
                 "latest_log": log_tail,
-                "message": "Still typesetting and rendering PDF... Please call `check_assembly_status` again.",
+                "message": "Still typesetting and rendering PDF... Call `check_assembly_status` again.",
             },
             ensure_ascii=False,
             indent=2,
         )
 
-    if session["assemble_status"] == "failed":
+    if status == "failed":
         return json.dumps(
             {
-                "session_id": session_id,
                 "status": "failed",
-                "device": session.get("assemble_device", "auto"),
-                "error": session["assemble_error"],
+                "session_dir": str(sdir),
+                "device": meta.get("assemble_device", "auto"),
+                "error": meta.get("assemble_error"),
             },
             ensure_ascii=False,
             indent=2,
@@ -516,12 +624,12 @@ def check_assembly_status(session_id: str, wait_seconds: int = 10) -> str:
 
     return json.dumps(
         {
-            "session_id": session_id,
             "status": "completed",
-            "device": session.get("assemble_device", "auto"),
-            "elapsed_seconds": session.get("assemble_elapsed"),
-            "output_dir": session["output_dir"],
-            "generated_files": session.get("generated_files", []),
+            "session_dir": str(sdir),
+            "device": meta.get("assemble_device", "auto"),
+            "elapsed_seconds": meta.get("assemble_elapsed"),
+            "output_dir": meta.get("output_dir"),
+            "generated_files": meta.get("generated_files", []),
         },
         ensure_ascii=False,
         indent=2,
