@@ -1,11 +1,12 @@
 {
   "mcpServers": {
     "babeldoc-translator": {
-      "command": "cmd.exe",
+      "command": "powershell.exe",
       "args": [
-        "/d",
-        "/c",
-        "\"%APPDATA%\\uv\\tools\\pdf2zh-next-mcp\\Scripts\\python.exe\" \"%USERPROFILE%\\.gemini\\config\\plugins\\babeldoc-plugin\\server\\main.py\""
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "$py = Join-Path $env:APPDATA 'uv\\tools\\pdf2zh-next-mcp\\Scripts\\python.exe'; $script = Join-Path $env:USERPROFILE '.gemini\\config\\plugins\\babeldoc-plugin\\server\\main.py'; & $py $script"
       ]
     }
   }
