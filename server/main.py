@@ -33,16 +33,7 @@ def _find_babeldoc_python() -> str:
     )
     for cand in candidates:
         if cand.exists():
-            try:
-                res = subprocess.run(
-                    [str(cand), "-c", "import babeldoc"],
-                    capture_output=True,
-                    timeout=5,
-                )
-                if res.returncode == 0:
-                    return str(cand)
-            except Exception:
-                pass
+            return str(cand)
     return sys.executable
 
 
